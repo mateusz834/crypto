@@ -35,7 +35,7 @@ func (b *Builder) AddASN1Enum(v int64) {
 }
 
 func (b *Builder) addASN1Signed(tag asn1.Tag, v int64) {
-	b.AddASN1(tag, func(c *Builder) {
+	b.ASN1(tag, func() {
 		length := 1
 		for i := v; i >= 0x80 || i < -0x80; i >>= 8 {
 			length++
@@ -43,14 +43,14 @@ func (b *Builder) addASN1Signed(tag asn1.Tag, v int64) {
 
 		for ; length > 0; length-- {
 			i := v >> uint((length-1)*8) & 0xff
-			c.AddUint8(uint8(i))
+			b.AddUint8(uint8(i))
 		}
 	})
 }
 
 // AddASN1Uint64 appends a DER-encoded ASN.1 INTEGER.
 func (b *Builder) AddASN1Uint64(v uint64) {
-	b.AddASN1(asn1.INTEGER, func(c *Builder) {
+	b.ASN1(asn1.INTEGER, func() {
 		length := 1
 		for i := v; i >= 0x80; i >>= 8 {
 			length++
@@ -58,7 +58,7 @@ func (b *Builder) AddASN1Uint64(v uint64) {
 
 		for ; length > 0; length-- {
 			i := v >> uint((length-1)*8) & 0xff
-			c.AddUint8(uint8(i))
+			b.AddUint8(uint8(i))
 		}
 	})
 }
@@ -69,7 +69,7 @@ func (b *Builder) AddASN1BigInt(n *big.Int) {
 		return
 	}
 
-	b.AddASN1(asn1.INTEGER, func(c *Builder) {
+	b.ASN1(asn1.INTEGER, func() {
 		if n.Sign() < 0 {
 			// A negative number has to be converted to two's-complement form. So we
 			// invert and subtract 1. If the most-significant-bit isn't set then
@@ -82,25 +82,25 @@ func (b *Builder) AddASN1BigInt(n *big.Int) {
 				bytes[i] ^= 0xff
 			}
 			if len(bytes) == 0 || bytes[0]&0x80 == 0 {
-				c.add(0xff)
+				b.add(0xff)
 			}
-			c.add(bytes...)
+			b.add(bytes...)
 		} else if n.Sign() == 0 {
-			c.add(0)
+			b.add(0)
 		} else {
 			bytes := n.Bytes()
 			if bytes[0]&0x80 != 0 {
-				c.add(0)
+				b.add(0)
 			}
-			c.add(bytes...)
+			b.add(bytes...)
 		}
 	})
 }
 
 // AddASN1OctetString appends a DER-encoded ASN.1 OCTET STRING.
 func (b *Builder) AddASN1OctetString(bytes []byte) {
-	b.AddASN1(asn1.OCTET_STRING, func(c *Builder) {
-		c.AddBytes(bytes)
+	b.ASN1(asn1.OCTET_STRING, func() {
+		b.AddBytes(bytes)
 	})
 }
 
@@ -113,27 +113,27 @@ func (b *Builder) AddASN1GeneralizedTime(t time.Time) {
 		return
 	}
 	b.AddASN1(asn1.GeneralizedTime, func(c *Builder) {
-		c.AddBytes([]byte(t.Format(generalizedTimeFormatStr)))
+		b.AddBytes([]byte(t.Format(generalizedTimeFormatStr)))
 	})
 }
 
 // AddASN1UTCTime appends a DER-encoded ASN.1 UTCTime.
 func (b *Builder) AddASN1UTCTime(t time.Time) {
-	b.AddASN1(asn1.UTCTime, func(c *Builder) {
+	b.ASN1(asn1.UTCTime, func() {
 		// As utilized by the X.509 profile, UTCTime can only
 		// represent the years 1950 through 2049.
 		if t.Year() < 1950 || t.Year() >= 2050 {
 			b.err = fmt.Errorf("cryptobyte: cannot represent %v as a UTCTime", t)
 			return
 		}
-		c.AddBytes([]byte(t.Format(defaultUTCTimeFormatStr)))
+		b.AddBytes([]byte(t.Format(defaultUTCTimeFormatStr)))
 	})
 }
 
 // AddASN1BitString appends a DER-encoded ASN.1 BIT STRING. This does not
 // support BIT STRINGs that are not a whole number of bytes.
 func (b *Builder) AddASN1BitString(data []byte) {
-	b.AddASN1(asn1.BIT_STRING, func(b *Builder) {
+	b.ASN1(asn1.BIT_STRING, func() {
 		b.AddUint8(0)
 		b.AddBytes(data)
 	})
@@ -179,7 +179,7 @@ func isValidOID(oid encoding_asn1.ObjectIdentifier) bool {
 }
 
 func (b *Builder) AddASN1ObjectIdentifier(oid encoding_asn1.ObjectIdentifier) {
-	b.AddASN1(asn1.OBJECT_IDENTIFIER, func(b *Builder) {
+	b.ASN1(asn1.OBJECT_IDENTIFIER, func() {
 		if !isValidOID(oid) {
 			b.err = fmt.Errorf("cryptobyte: invalid OID: %v", oid)
 			return
@@ -193,7 +193,7 @@ func (b *Builder) AddASN1ObjectIdentifier(oid encoding_asn1.ObjectIdentifier) {
 }
 
 func (b *Builder) AddASN1Boolean(v bool) {
-	b.AddASN1(asn1.BOOLEAN, func(b *Builder) {
+	b.ASN1(asn1.BOOLEAN, func() {
 		if v {
 			b.AddUint8(0xff)
 		} else {
@@ -239,6 +239,20 @@ func (b *Builder) AddASN1(tag asn1.Tag, f BuilderContinuation) {
 	}
 	b.AddUint8(uint8(tag))
 	b.addLengthPrefixed(1, true, f)
+}
+
+func (b *Builder) ASN1(tag asn1.Tag, f func()) {
+	if b.err != nil {
+		return
+	}
+	// Identifiers with the low five bits set indicate high-tag-number format
+	// (two or more octets), which we don't support.
+	if tag&0x1f == 0x1f {
+		b.err = fmt.Errorf("cryptobyte: high-tag number identifier octects not supported: 0x%x", tag)
+		return
+	}
+	b.AddUint8(uint8(tag))
+	b.addLengthPrefixed2(1, true, f)
 }
 
 // String

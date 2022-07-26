@@ -37,6 +37,24 @@ func TestContinuationError(t *testing.T) {
 	if s := err.Error(); s != errorStr {
 		t.Errorf("expected error %q, got %v", errorStr, s)
 	}
+
+	b = Builder{}
+	b.Uint8LengthPrefixed(func() {
+		b.AddUint8(1)
+		panic(BuildError{Err: errors.New(errorStr)})
+	})
+
+	ret, err = b.Bytes()
+	if ret != nil {
+		t.Error("expected nil result")
+	}
+	if err == nil {
+		t.Fatal("unexpected nil error")
+	}
+	if s := err.Error(); s != errorStr {
+		t.Errorf("expected error %q, got %v", errorStr, s)
+	}
+
 }
 
 func TestContinuationNonError(t *testing.T) {
@@ -53,6 +71,20 @@ func TestContinuationNonError(t *testing.T) {
 	t.Error("Builder did not panic")
 }
 
+func TestContinuationNonError2(t *testing.T) {
+	defer func() {
+		recover()
+	}()
+
+	var b Builder
+	b.Uint8LengthPrefixed(func() {
+		b.AddUint8(1)
+		panic(1)
+	})
+
+	t.Error("Builder did not panic")
+}
+
 func TestGeneratedPanic(t *testing.T) {
 	defer func() {
 		recover()
@@ -60,6 +92,20 @@ func TestGeneratedPanic(t *testing.T) {
 
 	var b Builder
 	b.AddUint8LengthPrefixed(func(b *Builder) {
+		var p *byte
+		*p = 0
+	})
+
+	t.Error("Builder did not panic")
+}
+
+func TestGeneratedPanic2(t *testing.T) {
+	defer func() {
+		recover()
+	}()
+
+	var b Builder
+	b.Uint8LengthPrefixed(func() {
 		var p *byte
 		*p = 0
 	})
@@ -211,7 +257,18 @@ func TestUint8LengthPrefixedSimple(t *testing.T) {
 		c.AddUint8(23)
 		c.AddUint8(42)
 	})
+
 	if err := builderBytesEq(&b, 2, 23, 42); err != nil {
+		t.Error(err)
+	}
+
+	var b2 Builder
+	b2.Uint8LengthPrefixed(func() {
+		b2.AddUint8(23)
+		b2.AddUint8(42)
+	})
+
+	if err := builderBytesEq(&b2, 2, 23, 42); err != nil {
 		t.Error(err)
 	}
 
@@ -247,6 +304,20 @@ func TestUint8LengthPrefixedMulti(t *testing.T) {
 		t.Error(err)
 	}
 
+	var b2 Builder
+	b2.Uint8LengthPrefixed(func() {
+		b2.AddUint8(23)
+		b2.AddUint8(42)
+	})
+	b2.AddUint8(5)
+	b2.Uint8LengthPrefixed(func() {
+		b2.AddUint8(123)
+		b2.AddUint8(234)
+	})
+	if err := builderBytesEq(&b2, 2, 23, 42, 5, 2, 123, 234); err != nil {
+		t.Error(err)
+	}
+
 	var s, child String = b.BytesOrPanic(), nil
 	var u, v, w, x, y uint8
 	if !s.ReadUint8LengthPrefixed(&child) || !child.ReadUint8(&u) || !child.ReadUint8(&v) ||
@@ -278,6 +349,21 @@ func TestUint8LengthPrefixedNested(t *testing.T) {
 	if err := builderBytesEq(&b, 5, 5, 2, 23, 42, 123); err != nil {
 		t.Error(err)
 	}
+
+	var b2 Builder
+	b2.Uint8LengthPrefixed(func() {
+		b2.AddUint8(5)
+		b2.Uint8LengthPrefixed(func() {
+			b2.AddUint8(23)
+			b2.AddUint8(42)
+		})
+		b2.AddUint8(123)
+	})
+	if err := builderBytesEq(&b2, 5, 5, 2, 23, 42, 123); err != nil {
+		t.Error(err)
+	}
+
+
 
 	var base, child1, child2 String = b.BytesOrPanic(), nil, nil
 	var u, v, w, x uint8
@@ -321,6 +407,22 @@ func TestPreallocatedBuffer(t *testing.T) {
 	if err := builderBytesEq(b, 1, 2, 3, 4, 5, 6); err != nil {
 		t.Error(err)
 	}
+
+	var buf2 [5]byte
+	b2 := NewBuilder(buf2[0:0])
+	b2.AddUint8(1)
+	b2.Uint8LengthPrefixed(func() {
+		b2.AddUint8(3)
+		b2.AddUint8(4)
+	})
+	b2.AddUint16(1286) // Outgrow buf by one byte.
+	if !bytes.Equal(buf2[:], want) {
+		t.Errorf("buf = %v want %v", buf, want)
+	}
+	if err := builderBytesEq(b2, 1, 2, 3, 4, 5, 6); err != nil {
+		t.Error(err)
+	}
+
 }
 
 func TestWriteWithPendingChild(t *testing.T) {
@@ -353,6 +455,34 @@ func TestWriteWithPendingChild(t *testing.T) {
 	})
 }
 
+func TestWriteWithPendingChild2(t *testing.T) {
+	var b Builder
+	b.AddUint8LengthPrefixed(func(c *Builder) {
+		c.Uint8LengthPrefixed(func () {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("recover() = nil, want error; b.AddUint8() did not panic")
+				}
+			}()
+			b.AddUint8(2) // panics
+		})
+
+		c.Uint8LengthPrefixed(func () {
+			c.AddUint8(2) //does not panic
+		})
+
+		c.AddUint8(2) //does not panic
+
+		defer func() {
+			if recover() == nil {
+				t.Errorf("recover() = nil, want error; b.AddUint8() did not panic")
+			}
+		}()
+		b.AddUint8(2) // panics
+
+	})
+
+}
 func TestSetError(t *testing.T) {
 	const errorStr = "TestSetError"
 	var b Builder
@@ -412,12 +542,67 @@ func TestUnwrite(t *testing.T) {
 	})
 }
 
+func TestUnwrite2(t *testing.T) {
+	var b Builder
+	b.AddBytes([]byte{1, 2, 3, 4, 5})
+	b.Unwrite(2)
+	if err := builderBytesEq(&b, 1, 2, 3); err != nil {
+		t.Error(err)
+	}
+
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Errorf("recover() = nil, want error; b.Unwrite() did not panic")
+			}
+		}()
+		b.Unwrite(4) // panics
+	}()
+
+	b = Builder{}
+	b.AddBytes([]byte{1, 2, 3, 4, 5})
+	b.Uint8LengthPrefixed(func() {
+		b.AddBytes([]byte{1, 2, 3, 4, 5})
+
+		defer func() {
+			if recover() == nil {
+				t.Errorf("recover() = nil, want error; b.Unwrite() did not panic")
+			}
+		}()
+		b.Unwrite(6) // panics
+	})
+
+	b = Builder{}
+	b.AddBytes([]byte{1, 2, 3, 4, 5})
+	b.Uint8LengthPrefixed(func() {
+		defer func() {
+			if recover() == nil {
+				t.Errorf("recover() = nil, want error; b.Unwrite() did not panic")
+			}
+		}()
+		b.Unwrite(2) // panics (attempted unwrite while child is pending)
+	})
+}
+
 func TestFixedBuilderLengthPrefixed(t *testing.T) {
 	bufCap := 10
 	inner := bytes.Repeat([]byte{0xff}, bufCap-2)
 	buf := make([]byte, 0, bufCap)
 	b := NewFixedBuilder(buf)
 	b.AddUint16LengthPrefixed(func(b *Builder) {
+		b.AddBytes(inner)
+	})
+	if got := b.BytesOrPanic(); len(got) != bufCap {
+		t.Errorf("Expected output length to be %d, got %d", bufCap, len(got))
+	}
+}
+
+func TestFixedBuilderLengthPrefixed2(t *testing.T) {
+	bufCap := 10
+	inner := bytes.Repeat([]byte{0xff}, bufCap-2)
+	buf := make([]byte, 0, bufCap)
+	b := NewFixedBuilder(buf)
+	b.Uint16LengthPrefixed(func() {
 		b.AddBytes(inner)
 	})
 	if got := b.BytesOrPanic(); len(got) != bufCap {
@@ -438,6 +623,21 @@ func TestFixedBuilderPanicReallocate(t *testing.T) {
 
 	t.Error("Builder did not panic")
 }
+
+func TestFixedBuilderPanicReallocate2(t *testing.T) {
+	defer func() {
+		recover()
+	}()
+
+	b := NewFixedBuilder(make([]byte, 0, 10))
+	b1 := NewFixedBuilder(make([]byte, 0, 10))
+	b.Uint16LengthPrefixed(func() {
+		*b = *b1
+	})
+
+	t.Error("Builder did not panic")
+}
+
 
 // ASN.1
 
